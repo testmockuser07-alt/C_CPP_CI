@@ -39,12 +39,7 @@ jobs:
 
       # 6. Code coverage (build instrumented, run tests, generate report)
       - name: Code coverage
-        run: |
-          # Remove any stale coverage data committed in the repo so gcovr
-          # only reads freshly generated files (avoids gcov version errors).
-          find . -name '*.gcda' -delete
-          find . -name '*.gcno' -delete
-          make coverageCheck
+        run: make coverageCheck
           mkdir -p coverage
           gcovr -r . --exclude unity/ --exclude test/ \
             --html --html-details -o coverage/coverage.html \
