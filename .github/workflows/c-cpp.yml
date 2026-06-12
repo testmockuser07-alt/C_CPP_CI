@@ -16,4 +16,4 @@ jobs:
     - name: make
       run: make -C 3_Implementation/ all
     - name: make check
-      run: make check -C 3_Implementation/ all
+      run: make check
