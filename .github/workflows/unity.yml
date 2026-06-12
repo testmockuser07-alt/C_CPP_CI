@@ -1,0 +1,16 @@
+name: Unit Testing using Unity
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: make
+        run: make -C 3_Implementaion/ test
+    
