@@ -1,41 +1,92 @@
-name: C/C++ CI
+name: C CI - Build, Test & Coverage
 
 on:
-  push: 
-   branches: [main]
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
 
 jobs:
-  build-test:
+  build-test-coverage:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+      # 1. Checkout source code
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
+      # 2. Install toolchain + coverage tools
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential lcov cmake
+          sudo apt-get install -y build-essential gcc make lcov gcovr libcmocka-dev
 
-      - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DENABLE_COVERAGE=ON
-
+      # 3. Build with coverage flags
+      #    Assumes a Makefile that respects CFLAGS/LDFLAGS.
+      #    Adjust to your build system (CMake example commented below).
       - name: Build
-        run: cmake --build build
-
-      - name: Run Unit Tests
         run: |
-          cd build
-          ctest --output-on-failure
+          make clean || true
+          make CFLAGS="-Wall -Wextra -g -O0 --coverage" LDFLAGS="--coverage"
 
-      - name: Generate Coverage
+      # --- CMake alternative ---
+      # - name: Build (CMake)
+      #   run: |
+      #     cmake -B build -DCMAKE_BUILD_TYPE=Debug \
+      #       -DCMAKE_C_FLAGS="--coverage -g -O0"
+      #     cmake --build build
+
+      # 4. Run unit tests
+      #    Assumes `make test` runs your test binary (Unity/CMocka/CUnit/etc.)
+      #    and that tests can emit JUnit XML for the report step.
+      - name: Run unit tests
         run: |
-          lcov --capture --directory build --output-file coverage.info
-          lcov --remove coverage.info '/usr/*' --output-file coverage.info
-          lcov --list coverage.info
+          make test
+        # CMake/CTest alternative:
+        # run: ctest --test-dir build --output-on-failure --output-junit test-results.xml
 
-      - name: Upload Coverage Artifact
+      # 5. Publish unit test report (requires JUnit XML output from your test runner)
+      - name: Publish test report
+        uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: Unit Test Results
+          path: '**/test-results.xml'
+          reporter: java-junit
+          fail-on-error: false
+
+      # 6. Generate code coverage reports (HTML + XML + console summary)
+      - name: Generate coverage report (gcovr)
+        run: |
+          mkdir -p coverage
+          gcovr -r . \
+            --exclude tests/ \
+            --html --html-details -o coverage/coverage.html \
+            --xml -o coverage/coverage.xml \
+            --print-summary
+
+      # 6b. Optional: lcov HTML report instead of/with gcovr
+      # - name: Generate coverage report (lcov)
+      #   run: |
+      #     lcov --capture --directory . --output-file coverage.info
+      #     lcov --remove coverage.info '/usr/*' 'tests/*' -o coverage.info
+      #     genhtml coverage.info --output-directory coverage-html
+
+      # 7. Upload coverage report as a downloadable artifact
+      - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
-          path: coverage.info
+          path: coverage/
+
+      # 8. Optional: upload to Codecov (needs CODECOV_TOKEN secret for private repos)
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage/coverage.xml
+          fail_ci_if_error: false
+
+      # 9. Optional: enforce a minimum coverage threshold (fails build if below 80%)
+      - name: Check coverage threshold
+        run: |
+          gcovr -r . --exclude tests/ --fail-under-line 80
