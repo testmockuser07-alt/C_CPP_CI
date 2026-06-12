@@ -1,0 +1,16 @@
+name: Code Quality - CppCheck
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  cppcheck:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cppcheck
+        run: sudo apt -y install cppcheck
+      - name: Run cppchek
+        run: cppcheck 3_Implementation 
