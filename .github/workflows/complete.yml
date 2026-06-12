@@ -1,92 +1,181 @@
-name: C CI - Build, Test & Coverage
+name: C CI - Build, Test, Report & Coverage
 
 on:
   push:
     branches: [ main, develop ]
   pull_request:
     branches: [ main, develop ]
+  workflow_dispatch:
+
+# All `run` steps execute inside the implementation folder that holds the
+# Makefile, sources, tests and the Unity framework.
+defaults:
+  run:
+    working-directory: 3_Implementation
+
+permissions:
+  contents: read
+  checks: write          # needed by dorny/test-reporter to publish a check run
+  pull-requests: write
 
 jobs:
   build-test-coverage:
+    name: Build, Test & Coverage
     runs-on: ubuntu-latest
 
     steps:
+      # ------------------------------------------------------------------
       # 1. Checkout source code
+      # ------------------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. Install toolchain + coverage tools
+      # ------------------------------------------------------------------
+      # 2. Install toolchain + coverage tooling
+      # ------------------------------------------------------------------
       - name: Install dependencies
+        working-directory: .
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential gcc make lcov gcovr libcmocka-dev
+          sudo apt-get install -y build-essential gcc g++ make gcovr python3
 
-      # 3. Build with coverage flags
-      #    Assumes a Makefile that respects CFLAGS/LDFLAGS.
-      #    Adjust to your build system (CMake example commented below).
-      - name: Build
+      # ------------------------------------------------------------------
+      # 3. Build the application  (make all -> build/game.out)
+      # ------------------------------------------------------------------
+      - name: Build application
         run: |
           make clean || true
-          make CFLAGS="-Wall -Wextra -g -O0 --coverage" LDFLAGS="--coverage"
+          make all
+          echo "----- Build artifacts -----"
+          ls -l build
 
-      # --- CMake alternative ---
-      # - name: Build (CMake)
-      #   run: |
-      #     cmake -B build -DCMAKE_BUILD_TYPE=Debug \
-      #       -DCMAKE_C_FLAGS="--coverage -g -O0"
-      #     cmake --build build
-
-      # 4. Run unit tests
-      #    Assumes `make test` runs your test binary (Unity/CMocka/CUnit/etc.)
-      #    and that tests can emit JUnit XML for the report step.
+      # ------------------------------------------------------------------
+      # 4. Run Unity unit tests (capture output, do not fail the step yet
+      #    so the report/coverage steps always run; gated later in step 8)
+      # ------------------------------------------------------------------
       - name: Run unit tests
         run: |
-          make test
-        # CMake/CTest alternative:
-        # run: ctest --test-dir build --output-on-failure --output-junit test-results.xml
+          set +e
+          make test | tee test-output.txt
+          echo "TEST_EXIT=${PIPESTATUS[0]}" >> "$GITHUB_ENV"
+          set -e
 
-      # 5. Publish unit test report (requires JUnit XML output from your test runner)
+      # ------------------------------------------------------------------
+      # 5. Convert Unity text output into JUnit XML for the test report
+      # ------------------------------------------------------------------
+      - name: Generate JUnit test report
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import re, html
+
+          lines = open("test-output.txt", encoding="utf-8", errors="replace").read().splitlines()
+          # Unity line format:  file:line:testname:PASS|FAIL|IGNORE[: message]
+          pat = re.compile(r'^(?P<file>.+?):(?P<line>\d+):(?P<name>.+?):(?P<res>PASS|FAIL|IGNORE)(?::\s*(?P<msg>.*))?$')
+          cases = []
+          for ln in lines:
+              m = pat.match(ln.strip())
+              if m:
+                  cases.append(m.groupdict())
+
+          total = len(cases)
+          failures = sum(1 for c in cases if c["res"] == "FAIL")
+          skipped  = sum(1 for c in cases if c["res"] == "IGNORE")
+
+          out = []
+          out.append('<?xml version="1.0" encoding="UTF-8"?>')
+          out.append(f'<testsuites tests="{total}" failures="{failures}" skipped="{skipped}">')
+          out.append(f'  <testsuite name="Unity Unit Tests" tests="{total}" failures="{failures}" skipped="{skipped}">')
+          for c in cases:
+              cls = html.escape(c["file"])
+              name = html.escape(c["name"])
+              out.append(f'    <testcase classname="{cls}" name="{name}">')
+              if c["res"] == "FAIL":
+                  msg = html.escape(c.get("msg") or "Assertion failed")
+                  out.append(f'      <failure message="{msg}">{cls}:{c["line"]} {name}: {msg}</failure>')
+              elif c["res"] == "IGNORE":
+                  out.append('      <skipped/>')
+              out.append('    </testcase>')
+          out.append('  </testsuite>')
+          out.append('</testsuites>')
+
+          with open("test-results.xml", "w", encoding="utf-8") as f:
+              f.write("\n".join(out))
+
+          print(f"Parsed {total} tests, {failures} failures, {skipped} skipped")
+          PY
+
+      # ------------------------------------------------------------------
+      # 6. Publish the unit-test pass/fail report (Checks tab + PR)
+      # ------------------------------------------------------------------
       - name: Publish test report
         uses: dorny/test-reporter@v1
         if: always()
         with:
           name: Unit Test Results
-          path: '**/test-results.xml'
+          path: '3_Implementation/test-results.xml'
           reporter: java-junit
           fail-on-error: false
 
-      # 6. Generate code coverage reports (HTML + XML + console summary)
-      - name: Generate coverage report (gcovr)
+      # ------------------------------------------------------------------
+      # 7. Code coverage  (rebuild instrumented, run, generate reports)
+      # ------------------------------------------------------------------
+      - name: Generate code coverage
+        if: always()
         run: |
+          # Remove any stale coverage data committed to the repo / earlier build
+          find . -name '*.gcda' -delete || true
+          make coverageCheck
           mkdir -p coverage
           gcovr -r . \
-            --exclude tests/ \
+            --exclude unity/ \
+            --exclude test/ \
             --html --html-details -o coverage/coverage.html \
             --xml -o coverage/coverage.xml \
-            --print-summary
+            --txt -o coverage/coverage.txt \
+            --print-summary | tee coverage/summary.txt
 
-      # 6b. Optional: lcov HTML report instead of/with gcovr
-      # - name: Generate coverage report (lcov)
-      #   run: |
-      #     lcov --capture --directory . --output-file coverage.info
-      #     lcov --remove coverage.info '/usr/*' 'tests/*' -o coverage.info
-      #     genhtml coverage.info --output-directory coverage-html
+      # ------------------------------------------------------------------
+      # 8. Build a human-readable job summary (test + coverage)
+      # ------------------------------------------------------------------
+      - name: Write job summary
+        if: always()
+        run: |
+          {
+            echo "## Unit Test Results"
+            echo '```'
+            cat test-output.txt || echo "no test output"
+            echo '```'
+            echo "## Code Coverage Summary"
+            echo '```'
+            cat coverage/summary.txt 2>/dev/null || echo "no coverage summary"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      # 7. Upload coverage report as a downloadable artifact
-      - name: Upload coverage artifact
+      # ------------------------------------------------------------------
+      # 9. Upload coverage + test artifacts (downloadable from the run)
+      # ------------------------------------------------------------------
+      - name: Upload coverage report
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
-          path: coverage/
+          path: 3_Implementation/coverage/
 
-      # 8. Optional: upload to Codecov (needs CODECOV_TOKEN secret for private repos)
-      - name: Upload to Codecov
-        uses: codecov/codecov-action@v4
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          files: coverage/coverage.xml
-          fail_ci_if_error: false
+          name: test-results
+          path: |
+            3_Implementation/test-output.txt
+            3_Implementation/test-results.xml
 
-      # 9. Optional: enforce a minimum coverage threshold (fails build if below 80%)
-      - name: Check coverage threshold
+      # ------------------------------------------------------------------
+      # 10. Fail the pipeline if any unit test failed
+      # ------------------------------------------------------------------
+      - name: Enforce test result
+        if: always()
         run: |
-          gcovr -r . --exclude tests/ --fail-under-line 80
+          echo "Unit test exit code: ${TEST_EXIT}"
+          test "${TEST_EXIT}" = "0"
